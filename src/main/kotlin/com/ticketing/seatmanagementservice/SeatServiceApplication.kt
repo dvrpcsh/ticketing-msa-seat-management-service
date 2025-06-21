@@ -1,4 +1,4 @@
-package com.ticketing.seat_service
+package com.ticketing.seatmanagementservice
 
 import org.springframework.boot.autoconfigure.SpringBootApplication
 import org.springframework.boot.runApplication
