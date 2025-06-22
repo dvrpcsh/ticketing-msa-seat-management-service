@@ -1,9 +1,13 @@
 package com.ticketing.seatmanagementservice.domain.seat
 
+import com.fasterxml.jackson.core.type.TypeReference
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.ticketing.seatmanagementservice.domain.seat.dto.LockSeatRequest
 import com.ticketing.seatmanagementservice.domain.seat.dto.SeatRegistrationRequest
+import com.ticketing.seatmanagementservice.domain.seat.dto.SeatStatusResponse
 import org.springframework.data.redis.core.RedisTemplate
 import org.springframework.stereotype.Service
+import java.time.Duration
 
 /**
  * 좌석 정보 등록 및 상태 관리에 대한 비즈니스 로직을 처리하는 서비스
@@ -44,5 +48,84 @@ class SeatManagementService (
 
         //HASH 자료구조를 사용하여, 하나의 상품에 대한 모든 좌석 정보를 그룹으로 묶어 저장합니다.
         redisTemplate.opsForHash<String, String>().putAll(key, seatsMap)
+    }
+
+    /**
+     * 특정 상품의 전체 좌석 상태 목록을 조회합니다.
+     *
+     * 흐름
+     * 1.요청된 productId를 기반으로 Redis에서 사용할 키를 생성합니다.
+     * 2.Redis의 HGETALL 명령어에 해당하는 entries()를 호출하여, 해당 키의 모든 필드(좌석ID)와 값(좌석 정보 JSON)을 Map 형태로 가져옵니다.
+     * 3.가져온 Map의 각 항목을 순회합니다.
+     * 4.각 좌석의 정보(JSON 문자열)를 Map<String, Any> 형태로 다시 변환(파싱)합니다.
+     * 5.파싱된 정보와 좌석ID를 사용하여 최종 응답 DTO인 SeatStatusResponse 객체를 생성합니다.
+     * 6.생성된 DTO들을 리스트에 담아 클라이언트에게 반환합니다.
+     */
+    fun getSeatStatuses(productId: Long): List<SeatStatusResponse> {
+        val key = "product:${productId}:seats"
+        val hashEntries = redisTemplate.opsForHash<String, String>().entries(key)
+
+        return hashEntries.map { (seatId, seatDetailsJson) ->
+            //JSON문자열을 Map으로 변환(TypeReference를 사용하여 Generic타입 정확히 명시)
+            //val seatDetails: Map<String, Any> = objectMapper.readValue(seatDetailsJson)
+            val seatDetails: Map<String, Any> = objectMapper.readValue(seatDetailsJson, object : TypeReference<Map<String, Any>>() {})
+
+            SeatStatusResponse(
+                seatId = seatId,
+                grade =  seatDetails["grade"] as String,
+                price =  seatDetails["price"] as Int,
+                status =  SeatStatus.valueOf(seatDetails["status"] as String)
+            )
+        }
+    }
+
+    /**
+     * 특정 좌석을 선택하면 다른 사용자가 접근하지 못하게 잠금(Lock)을 합니다.
+     *
+     * 흐름
+     * 1.좌석 잠금을 위한 별도 키를 생성합니다.
+     * 2.Redis의 'setIfAbsent (SETNX)' 명령어를 사용하여 1번에서 만든 키를 설정합니다.
+     * 2-1 위 작업이 성공하면 true, 실패하면 false 반환
+     * 3.좌석 선점에 성공하면, 해당 좌석의 상태를 'LOCKED'로 업데이트합니다.
+     * 3-1 기존 좌석 정보를 가져와 상태만 변경하고, 다시 JSON으로 변환하여 HASH에 덮어씀
+     * 4.선점된 좌석은 5분 뒤에 자동으로 잠금이 해제되도록 만료 시간을 설정합니다.
+     */
+    fun lockSeat(request: LockSeatRequest): Boolean {
+        val lockKey = "lock:product:${request.productId}:${request.seatId}"
+        val seatkey = "product:${request.productId}:seats"
+        val lockDuration = Duration.ofMinutes(5) //5분동안 잠금
+
+        //SETNX를 이용한 잠금 시도
+        val locked = redisTemplate.opsForValue().setIfAbsent(lockKey, request.userId.toString(), lockDuration)
+
+        if(locked != true) {
+            //다른 사용자가 이미 선점중이라 예외 발생
+            throw IllegalArgumentException("매진된 좌석입니다.")
+        }
+
+        try {
+            //좌석 상태를 LOCKED로 변경
+            val seatDetailsJson = redisTemplate.opsForHash<String, String>().get(seatkey, request.seatId)
+                ?: throw IllegalArgumentException("존재하지 않는 좌석입니다.")
+
+            val seatDetails: MutableMap<String, Any> = objectMapper.readValue(seatDetailsJson, object : TypeReference<MutableMap<String, Any>>() {})
+
+            //이미 예약된 좌석인지 한번 더 확인
+            if(SeatStatus.valueOf(seatDetails["status"] as String) != SeatStatus.AVAILABLE) {
+                redisTemplate.delete(lockKey) //락을 다시 풀어줌
+                throw IllegalArgumentException("이미 예약된 좌석입니다.")
+            }
+
+            seatDetails["status"] = SeatStatus.LOCKED.name
+            val updatedSeatDetailsJson = objectMapper.writeValueAsString(seatDetails)
+
+            redisTemplate.opsForHash<String, String>().put(seatkey, request.seatId, updatedSeatDetailsJson)
+
+            return true
+        } catch(e: Exception) {
+            //상태 업데이트 중 문제가 발생하면, 설정했던 락을 다시 풀어줍니다.
+            redisTemplate.delete(lockKey)
+            throw e
+        }
     }
 }
