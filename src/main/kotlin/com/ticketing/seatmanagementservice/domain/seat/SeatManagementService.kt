@@ -128,4 +128,34 @@ class SeatManagementService (
             throw e
         }
     }
+
+    /**
+     * 결제과 완료된 좌석의 상태를 'RESERVED'(예매 완료)로 변경합니다.
+     *
+     * 흐름
+     * 1.Kafka로부터 productId와 seatId를 전달받습니다.
+     * 2.Redis에 저장된 해당 좌석의 정보를 가져옵니다.
+     * 3.좌석의 상태를 'RESERVED'로 변경하고, 다시 JSON으로 변환하여 HASH에 덮어씁니다.
+     * 4.결제가 완료되었으므로, 좌석 선점(Lock)을 위해 사용했던 임시 lockKey를 삭제하여 다른 요청이 들어오지 않도록 합니다.
+     */
+    fun updateSeatStatusToReserved(productId: Long, seatId: String) {
+        val seatKey = "product:${productId}:seats"
+        val lockKey = "lock:product:${productId}:${seatId}"
+
+        val seatDetailsJson = redisTemplate.opsForHash<String, String>().get(seatKey, seatId)
+            ?: //좌석 정보가 없으면, 이미 다른 로직에 의해 처리되거나 잘못된 요청일 수 있으므로 로그만 남기고 종료.
+            return
+
+        val seatDetails: MutableMap<String, Any> = objectMapper.readValue(seatDetailsJson, object : TypeReference<MutableMap<String, Any>>() {})
+
+        //상태를 RESERVED로 변경
+        seatDetails["status"] = SeatStatus.RESERVED.name
+        val updatedSeatDetailsJson = objectMapper.writeValueAsString(seatDetails)
+
+        //HASH에 업데이트된 정보 저장
+        redisTemplate.opsForHash<String, String>().put(seatKey, seatId, updatedSeatDetailsJson)
+
+        //사용이 끝난 lockKey삭제
+        redisTemplate.delete(lockKey)
+        }
 }
