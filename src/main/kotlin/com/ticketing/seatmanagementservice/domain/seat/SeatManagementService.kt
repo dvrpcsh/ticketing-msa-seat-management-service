@@ -157,5 +157,30 @@ class SeatManagementService (
 
         //사용이 끝난 lockKey삭제
         redisTemplate.delete(lockKey)
+    }
+
+    /**
+     * 결제 실패 또는 주문 취소 시, 선점했던 좌석의 잠금을 해제합니다.
+     *
+     * 1.Kafka로부터 productId와 seatId를 전달받습니다.
+     * 2.Redis에 저장된 해당 좌석의 정보를 가져옵니다.
+     * 3.좌석의 상태가 'LOCKED'일 경우에만 'AVAILABLE'로 변경하고 다시 저장하여 덮어씁니다.
+     * 4.좌석 선점(LOCK)을 위해 사용했던 임시 lockKey를 삭제하여 다른 요청이 들어오지 않도록 합니다.
+     */
+    fun releaseSeatLock(productId: Long, seatId: String) {
+        val seatKey = "product:${productId}:seats"
+        val lockKey = "lock:product:${productId}:${seatId}"
+        val seatDetailsJson = redisTemplate.opsForHash<String,String>().get(seatKey, seatId) ?: return
+        val seatDetails: MutableMap<String, Any> = objectMapper.readValue(seatDetailsJson, object : TypeReference<MutableMap<String, Any>>(){})
+
+        //상태가 LOCKED일 경우에만 AVAILABLE로 변경
+        if(SeatStatus.valueOf(seatDetails["status"] as String) == SeatStatus.LOCKED) {
+            seatDetails["status"] = SeatStatus.AVAILABLE.name
+            val updatedSeatDetailsJson = objectMapper.writeValueAsString(seatDetails)
+            redisTemplate.opsForHash<String, String>().put(seatKey, seatId, updatedSeatDetailsJson)
         }
+
+        //사용이 끝난 lockKey삭제
+        redisTemplate.delete(lockKey)
+    }
 }

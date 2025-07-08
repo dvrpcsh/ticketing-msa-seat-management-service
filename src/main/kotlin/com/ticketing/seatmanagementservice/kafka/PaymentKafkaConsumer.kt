@@ -30,8 +30,10 @@ class PaymentKafkaConsumer (
             seatManagementService.updateSeatStatusToReserved(message.productId, message.seatId)
             logger.info("좌석(ID: ${message.seatId}) 상태가 '예매 완료'로 성공적으로 변경되었습니다.")
         } else {
-            //TODO: 결제 실패 시 좌석 잠금 해제 등 예외 처리 로직
+            //결제 실패 시 좌석 잠금 해제 로직 호출
             logger.warn("결제 실패 메시지 수신: 좌석(ID: ${message.seatId})의 잠금을 해제해야 합니다.")
+            seatManagementService.releaseSeatLock(message.productId, message.seatId)
+            logger.info("좌석(ID: ${message.seatId})의 잠금이 성공적으로 해제되었습니다.")
         }
     }
 }
